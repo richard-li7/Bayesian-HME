@@ -2,6 +2,7 @@ import numpy as np
 from scipy.special import expit
 from scipy.stats import gamma
 import matplotlib.pyplot as plt
+import math
 
 class LinearExpert:
     def __init__(self, input_dim, output_dim):
