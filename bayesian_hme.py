@@ -2,158 +2,233 @@
 import numpy as np
 from scipy.special import expit
 
+class TreeNode:
+    """Base class for tree nodes"""
+    def __init__(self):
+        pass
+
+class GatingNode(TreeNode):
+    """Internal node that makes binary decisions"""
+    def __init__(self, node_id, left_child=None, right_child=None):
+        super().__init__()
+        self.node_id = node_id
+        self.left_child = left_child    # Go here if z_i = 1 
+        self.right_child = right_child  # Go here if z_i = 0
+        
+    def is_leaf(self):
+        return False
+
+class ExpertNode(TreeNode):
+    """Leaf node that makes predictions"""
+    def __init__(self, expert_id):
+        super().__init__()
+        self.expert_id = expert_id
+        
+    def is_leaf(self):
+        return True
+
 class HMEModel:
-    """Hierarchical Mixture of Experts model"""
+    """Hierarchical Mixture of Experts with proper binary tree structure"""
     
-    def __init__(self, expert_paths):
+    def __init__(self, root_node):
         """
-        expert_paths: dict mapping expert_id -> list of (gating_node, direction) tuples
-        
-        Example for Figure 1 tree:
-        expert_paths = {
-            0: [(0, 'left')],                    # expert 0: left at gating node 0
-            1: [(0, 'right'), (1, 'left')],     # expert 1: right at 0, left at 1  
-            2: [(0, 'right'), (1, 'right')]     # expert 2: right at 0, right at 1
-        }
+        Args:
+            root_node: TreeNode that is the root of the HME tree
         """
-        self.expert_paths = expert_paths
-        self.num_experts = len(expert_paths)
-        
-        # Extract all gating nodes used
-        all_gating_nodes = set()
-        for path in expert_paths.values():
-            for gating_node, _ in path:
-                all_gating_nodes.add(gating_node)
-        
-        self.gating_nodes = sorted(list(all_gating_nodes))
+        self.root = root_node
+        self.experts = self._collect_experts()
+        self.gating_nodes = self._collect_gating_nodes()
+        self.num_experts = len(self.experts)
         self.num_gating_nodes = len(self.gating_nodes)
+    
+    def _collect_experts(self):
+        """Collect all expert nodes via tree traversal"""
+        experts = []
+        
+        def traverse(node):
+            if node is None:
+                return
+            if node.is_leaf():
+                experts.append(node.expert_id)
+            else:
+                traverse(node.left_child)
+                traverse(node.right_child)
+        
+        traverse(self.root)
+        return sorted(experts)
+    
+    def _collect_gating_nodes(self):
+        """Collect all gating node IDs via tree traversal"""
+        gating_nodes = []
+        
+        def traverse(node):
+            if node is None:
+                return
+            if not node.is_leaf():
+                gating_nodes.append(node.node_id)
+                traverse(node.left_child)
+                traverse(node.right_child)
+        
+        traverse(self.root)
+        return sorted(gating_nodes)
     
     def compute_mixing_coefficients(self, x, v_means):
         """
-        Compute π_j(x) for each expert j
+        Compute pi_j(x) for each expert j by traversing tree paths
         
-        From paper: π_j(x) = ∏_{i on path to j} [σ(v_i^T x) if left, 1-σ(v_i^T x) if right]
+    
+            Parameter x: input vector (shape: input_dim,)
+            Parameter v_means: dict mapping gating_node_id -> weight vector
         
-        Args:
-            x: input vector (shape: input_dim,)
-            v_means: dict mapping gating_node -> weight vector (from variational dist)
-        
-        Returns:
-            mixing_coeffs: array of shape (num_experts,) with π_j(x) values
+        Returns dict mapping expert_id -> pi_j(x) (mixing coefficients)
         """
         x = np.asarray(x)
-        mixing_coeffs = np.zeros(self.num_experts)
+        mixing_coeffs = {}
         
-        # For each expert, compute product of gating probabilities along its path
-        for expert_j, path in self.expert_paths.items():
-            path_prob = 1.0
-            
-            for gating_node_i, direction in path:
-                # Get gating weight vector for this node
-                v_i = v_means[gating_node_i]  # shape: (input_dim,)
+        def traverse_to_experts(node, current_prob):
+            """Recursively compute path probabilities"""
+            if node is None:
+                return
                 
-                # Compute gating probability σ(v_i^T x)
+            if node.is_leaf():
+                # We've reached an expert - store the accumulated probability
+                mixing_coeffs[node.expert_id] = current_prob
+            else:
+                # This is a gating node - compute left/right probabilities
+                v_i = v_means[node.node_id]
                 gate_activation = np.dot(v_i, x)
                 gate_prob = expit(gate_activation)  # σ(v_i^T x)
                 
-                # Multiply by appropriate probability based on direction
-                if direction == 'left':
-                    path_prob *= gate_prob        # z_i = 1 case
-                else:  # direction == 'right' 
-                    path_prob *= (1 - gate_prob)  # z_i = 0 case
-            
-            mixing_coeffs[expert_j] = path_prob
-            
+                # Traverse left (z_i = 1) and right (z_i = 0)
+                traverse_to_experts(node.left_child, current_prob * gate_prob)
+                traverse_to_experts(node.right_child, current_prob * (1 - gate_prob))
+        
+        # Start traversal from root with probability 1.0
+        traverse_to_experts(self.root, 1.0)
+        
         return mixing_coeffs
     
     def expert_prediction(self, x, W_j):
-        """
-        Compute mean prediction for expert j: y_j(x) = W_j x
-        
-        Args:
-            x: input vector (shape: input_dim,)
-            W_j: weight matrix for expert j (shape: target_dim, input_dim)
-        
-        Returns:
-            prediction: vector of shape (target_dim,)
-        """
-        x = np.asarray(x)
-        W_j = np.asarray(W_j)
-        
-        return np.dot(W_j, x)  # Matrix-vector multiply
+        """Compute prediction for expert j: y_j(x) = W_j x"""
+        return np.dot(W_j, x)
     
     def forward_pass(self, x, v_means, W_means):
         """
-        Complete forward pass: compute mixture prediction
+        Complete forward pass through the HME
         
-        Args:
-            x: input vector  
-            v_means: dict mapping gating_node -> weight vector
-            W_means: dict mapping expert -> weight matrix
+            Parameter x: input vector
+            Parameter v_means: dict mapping gating_node_id -> weight vector  
+            Parameter W_means: dict mapping expert_id -> weight matrix
             
-        Returns:
-            prediction: weighted average of expert predictions
-            mixing_coeffs: individual mixing coefficients
+        Returns
+            prediction: final mixture prediction
+            mixing_coeffs: dict of mixing coefficients
         """
         # Get mixing coefficients
         mixing_coeffs = self.compute_mixing_coefficients(x, v_means)
         
-        # Get expert predictions  
-        expert_preds = []
-        for expert_j in range(self.num_experts):
-            pred_j = self.expert_prediction(x, W_means[expert_j])
-            expert_preds.append(pred_j)
-        
-        expert_preds = np.array(expert_preds)  # shape: (num_experts, target_dim)
-        
-        # Weighted mixture
-        prediction = np.sum(mixing_coeffs[:, None] * expert_preds, axis=0)
+        # Compute weighted mixture of expert predictions
+        prediction = 0
+        for expert_id, coeff in mixing_coeffs.items():
+            expert_pred = self.expert_prediction(x, W_means[expert_id])
+            prediction += coeff * expert_pred
         
         return prediction, mixing_coeffs
-
-# Helper function to create common tree structures
-def create_binary_tree(depth):
-    """
-    Create a balanced binary tree of given depth
     
-    Args:
-        depth: tree depth (depth=1 means 2 experts, depth=2 means 4 experts, etc.)
-    
-    Returns:
-        expert_paths: dict suitable for HMEModel
-    """
-    num_experts = 2 ** depth
-    expert_paths = {}
-    
-    for expert_id in range(num_experts):
+    def get_path_to_expert(self, target_expert_id):
+        """
+        Get the path from root to a specific expert
+        
+        Returns path: list of (gating_node_id, direction) tuples
+        """
         path = []
         
-        # Convert expert_id to binary path
-        binary = format(expert_id, f'0{depth}b')
+        def find_path(node, current_path):
+            if node is None:
+                return False
+                
+            if node.is_leaf():
+                if node.expert_id == target_expert_id:
+                    path.extend(current_path)
+                    return True
+                return False
+            else:
+                # Try left branch
+                if find_path(node.left_child, current_path + [(node.node_id, 'left')]):
+                    return True
+                # Try right branch  
+                if find_path(node.right_child, current_path + [(node.node_id, 'right')]):
+                    return True
+                return False
         
-        for level, bit in enumerate(binary):
-            gating_node = level
-            direction = 'left' if bit == '0' else 'right'
-            path.append((gating_node, direction))
-            
-        expert_paths[expert_id] = path
+        find_path(self.root, [])
+        return path
     
-    return expert_paths
+    def print_tree(self):
+        """Print tree structure for debugging"""
+        def print_node(node, level=0):
+            indent = "  " * level
+            if node is None:
+                return
+            if node.is_leaf():
+                print(f"{indent}Expert {node.expert_id}")
+            else:
+                print(f"{indent}Gate {node.node_id}")
+                print(f"{indent}├─ Left:")
+                print_node(node.left_child, level + 1)
+                print(f"{indent}└─ Right:")
+                print_node(node.right_child, level + 1)
+        
+        print_node(self.root)
+
+# Helper functions to build common tree structures
+def build_figure1_tree():
+    """Build the tree from Figure 1 in the paper"""
+    expert_0 = ExpertNode(0)
+    expert_1 = ExpertNode(1) 
+    expert_2 = ExpertNode(2)
+    
+    gating_1 = GatingNode(1, left_child=expert_1, right_child=expert_2)
+    gating_0 = GatingNode(0, left_child=expert_0, right_child=gating_1)
+    
+    return gating_0
+
+def build_balanced_binary_tree(depth):
+    """Build a balanced binary tree of given depth"""
+    expert_counter = [0]  # Use list for mutable counter
+    gating_counter = [0]
+    
+    def build_subtree(current_depth):
+        if current_depth == depth:
+            # Create leaf (expert)
+            expert_id = expert_counter[0]
+            expert_counter[0] += 1
+            return ExpertNode(expert_id)
+        else:
+            # Create internal node (gating)
+            gating_id = gating_counter[0]
+            gating_counter[0] += 1
+            
+            left_child = build_subtree(current_depth + 1)
+            right_child = build_subtree(current_depth + 1)
+            
+            return GatingNode(gating_id, left_child, right_child)
+    
+    return build_subtree(0)
 
 # Example usage:
 if __name__ == "__main__":
-    # Create the tree from Figure 1 in the paper
-    expert_paths = {
-        0: [(0, 'left')],                    
-        1: [(0, 'right'), (1, 'left')],     
-        2: [(0, 'right'), (1, 'right')]     
-    }
+    # Build tree from Figure 1
+    root = build_figure1_tree()
+    model = HMEModel(root)
     
-    model = HMEModel(expert_paths)
-    print(f"Number of experts: {model.num_experts}")
-    print(f"Number of gating nodes: {model.num_gating_nodes}")
+    print("Tree structure:")
+    model.print_tree()
+    
+    print(f"\nExperts: {model.experts}")
     print(f"Gating nodes: {model.gating_nodes}")
     
-    # Or create a balanced binary tree
-    balanced_paths = create_binary_tree(depth=2)  # 4 experts
-    balanced_model = HMEModel(balanced_paths)
+    # Show path to each expert
+    for expert_id in model.experts:
+        path = model.get_path_to_expert(expert_id)
+        print(f"Path to expert {expert_id}: {path}")
