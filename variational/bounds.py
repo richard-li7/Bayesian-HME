@@ -11,7 +11,7 @@ class SigmoidBound:
     def gating_bound(self, zi, vi, x, xi):
         """p(z_i | v_i, x) ≥ exp(z_i v_i^T x) F(-v_i^T x, \xi_i)
         
-        Parameter zi: zi \in {0,1} where 0 signifies going left, and 1 signifies going right in the expert tree
+        Parameter zi: zi \in {0,1} where 1 signifies going left, and 0 signifies going right in the expert tree
 
         Parameter vi: Vector of weight associated with gate i
 
