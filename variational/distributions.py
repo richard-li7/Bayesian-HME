@@ -79,10 +79,7 @@ class VariationalDistributions:
         # Returns the current value of the lower bound
         pass
 
-# Usage:
 var_dists = VariationalDistributions(num_experts=3, num_gating_nodes=2, 
                                    input_dim=3, target_dim=1)
 
-# During training, you'd iteratively update these distributions
-# using the variational update equations from the paper
 expectations = var_dists.get_expectations()
